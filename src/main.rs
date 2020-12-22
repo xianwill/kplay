@@ -10,6 +10,55 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use structopt::StructOpt;
 
+#[derive(Debug, StructOpt)]
+#[structopt(name = "kafka-player")]
+/// Options for kafka-player to use.
+struct Opt {
+    /// The Kafka bootstrap servers.
+    #[structopt(short, long, default_value = "localhost:9092")]
+    bootstrap_servers: String,
+
+    /// The topic to play messages onto.
+    #[structopt(short, long)]
+    topic: String,
+
+    /// Location of keystore to use for TLS authentication.
+    #[structopt(short = "l", long, parse(from_os_str))]
+    keystore_location: Option<PathBuf>,
+
+    /// Passphrase for the keystore.
+    #[structopt(short = "s", long)]
+    keystore_secret: Option<String>,
+
+    /// The line-delimited message file containing the messages to play.
+    #[structopt(short = "f", long, parse(from_os_str))]
+    message_file: PathBuf,
+
+    /// The number of messages to play in total.
+    #[structopt(short = "c", long, default_value = "100000")]
+    message_count: u32,
+
+    /// The number of messages to play per second.
+    #[structopt(short = "r", long, default_value = "1")]
+    message_rate: u32,
+
+    /// The number of messages to wait for between progress reports.
+    #[structopt(short = "p", long, default_value = "1000")]
+    progress_interval: u32,
+}
+
+/// Creates an `rdkafka::config::ClientConfig` from an `Opt`.
+impl From<&Opt> for ClientConfig {
+    fn from(opt: &Opt) -> Self {
+        let mut kafka_config: ClientConfig = ClientConfig::new();
+
+        // TODO: accept kafka props as a list and set them all
+        kafka_config.set("bootstrap.servers", &opt.bootstrap_servers);
+
+        kafka_config
+    }
+}
+
 fn main() {
     pretty_env_logger::init();
 
@@ -104,55 +153,6 @@ fn spawn_and_log_error(fut: DeliveryFuture) -> task::JoinHandle<()> {
             error!("{:?}", e)
         }
     })
-}
-
-/// Creates an `rdkafka::config::ClientConfig` from an `Opt`.
-impl From<&Opt> for ClientConfig {
-    fn from(opt: &Opt) -> Self {
-        let mut kafka_config: ClientConfig = ClientConfig::new();
-
-        // TODO: accept kafka props as a list and set them all
-        kafka_config.set("bootstrap.servers", &opt.bootstrap_servers);
-
-        kafka_config
-    }
-}
-
-#[derive(Debug, StructOpt)]
-#[structopt(name = "kafka-player")]
-/// Options for kafka-player to use.
-struct Opt {
-    /// The Kafka bootstrap servers.
-    #[structopt(short, long, default_value = "localhost:9092")]
-    bootstrap_servers: String,
-
-    /// The topic to play messages onto.
-    #[structopt(short, long)]
-    topic: String,
-
-    /// Location of keystore to use for TLS authentication.
-    #[structopt(short = "l", long, parse(from_os_str))]
-    keystore_location: Option<PathBuf>,
-
-    /// Passphrase for the keystore.
-    #[structopt(short = "s", long)]
-    keystore_secret: Option<String>,
-
-    /// The line-delimited message file containing the messages to play.
-    #[structopt(short = "f", long, parse(from_os_str))]
-    message_file: PathBuf,
-
-    /// The number of messages to play in total.
-    #[structopt(short = "c", long, default_value = "100000")]
-    message_count: u32,
-
-    /// The number of messages to play per second.
-    #[structopt(short = "r", long, default_value = "1")]
-    message_rate: u32,
-
-    /// The number of messages to wait for between progress reports.
-    #[structopt(short = "p", long, default_value = "1000")]
-    progress_interval: u32,
 }
 
 #[cfg(test)]
