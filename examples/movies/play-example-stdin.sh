@@ -10,7 +10,8 @@ scriptpath="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 message_file=$scriptpath/example.json
 message_count=10000
-message_rate=1000000
+message_rate=1
+progress_interval=10
 topic=example
 bootstrap_servers=localhost:9092
 
@@ -21,10 +22,10 @@ fi
 
 echo "Invoking debug binary"
 
-$scriptpath/../../target/debug/kafka-player-rs \
-  -f $message_file \
+cat $scriptpath/example.json | RUST_LOG=info $scriptpath/../../target/debug/kafka-player-rs \
   -c $message_count \
   -r $message_rate \
+  -p $progress_interval \
   -t $topic \
   -b $bootstrap_servers
 
