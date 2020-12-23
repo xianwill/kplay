@@ -1,12 +1,16 @@
 #![warn(rust_2018_idioms)]
 
 use async_std::task;
+use futures::prelude::*;
 use governor::{Quota, RateLimiter};
 use log::*;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{DeliveryFuture, FutureProducer, FutureRecord};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io;
+use std::io::prelude::*;
+//use async_std::io;
+//use async_std::io::prelude::*;
 use std::ops::FnMut;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -91,34 +95,44 @@ fn main() {
             // send to kafka and check progress on each callback from the read loop
             |i, line| {
                 send_to_kafka(line, &opt.topic, &producer);
-                check_progress(i, opt.progress_interval, &start);
+                check_progress(i, opt.progress_interval, &start).map(|p| info!("{:?}", p));
             },
-            buf,
+            buf.lines(),
         ));
     };
 
     // invoke the program with the appropriate input buffer
-    match file_buf(&opt) {
+    match file_buf(&opt.message_file) {
         Some(b) => program(Box::new(b)),
         None => program(Box::new(std::io::stdin().lock())),
     }
 }
 
 /// Creates an Option<BufReader<File>> for the file path specified in program options. Returns
-/// `None` if no path is specified.
-fn file_buf(opt: &Opt) -> Option<BufReader<File>> {
-    match &opt.message_file {
+/// `None` if no path is specified in program options.
+fn file_buf(path_buf: &Option<PathBuf>) -> Option<io::BufReader<File>> {
+    match path_buf {
         Some(p) => {
             let path = p.as_path();
             let file = File::open(path).expect(format!("Failed to open file {:?}", path).as_str());
-            Some(BufReader::new(file))
+            Some(io::BufReader::new(file))
         }
         _ => None,
     }
 }
 
+fn async_lines<T>(reader: T) -> impl Stream<Item = Result<String, String>>
+where
+    T: BufRead,
+{
+    stream::iter(reader.lines().map(|r| match r {
+        Ok(line) => Ok(line),
+        Err(e) => Err(e.to_string()),
+    }))
+}
+
 /// Reads all messages in the buffer and invokes the given callback on each one.
-async fn read_all<T, F>(message_rate: u32, message_count: u32, mut callback: F, buf: T)
+async fn read_all<T, F>(message_rate: u32, message_count: u32, mut callback: F, buf: io::Lines<T>)
 where
     T: BufRead,
     F: FnMut(u32, String),
@@ -132,7 +146,7 @@ where
     let mut send_count = 0u32;
 
     // iterate lines and invoke the callback for each one
-    for result in buf.lines() {
+    for result in buf {
         if send_count == message_count {
             info!("Sent {} lines. Terminating.", send_count);
             break;
@@ -159,20 +173,11 @@ fn send_to_kafka(line: String, topic: &str, producer: &FutureProducer) {
 }
 
 /// Logs current progress.
-fn check_progress(send_count: u32, progress_interval: u32, start: &Instant) {
+fn check_progress(send_count: u32, progress_interval: u32, start: &Instant) -> Option<Progress> {
     if send_count % progress_interval == 0 && send_count > 0 {
-        let elapsed_millis = start.elapsed().as_millis() as f64;
-        let elapsed_seconds = start.elapsed().as_secs_f32();
-        let per_milli = send_count as f64 / elapsed_millis;
-        let per_sec = per_milli * 1000f64;
-        info!(
-            "Message rate is {} per millisecond ({} per second). Sent {} messages in {} seconds ({} minutes).",
-            per_milli,
-            per_sec,
-            send_count,
-            elapsed_seconds,
-            elapsed_seconds / 60 as f32
-        );
+        Some(Progress::new(send_count, start))
+    } else {
+        None
     }
 }
 
@@ -185,19 +190,105 @@ fn spawn_and_log_error(fut: DeliveryFuture) -> task::JoinHandle<()> {
     })
 }
 
+#[derive(Debug)]
+struct Progress {
+    send_count: u32,
+    per_milli: f64,
+    per_sec: f64,
+    elapsed_seconds: f32,
+    elapsed_minutes: f32,
+}
+
+impl Progress {
+    fn new(send_count: u32, start: &Instant) -> Self {
+        let elapsed_millis = start.elapsed().as_millis() as f64;
+        let elapsed_seconds = start.elapsed().as_secs_f32();
+        let elapsed_minutes = elapsed_seconds / 60 as f32;
+        let per_milli = send_count as f64 / elapsed_millis;
+        let per_sec = per_milli * 1000f64;
+
+        Progress {
+            send_count,
+            per_milli,
+            per_sec,
+            elapsed_seconds,
+            elapsed_minutes,
+        }
+    }
+}
+
+// struct FileMessageSource {
+//     buf: io::BufReader<File>,
+// }
+
+// struct StdinLockMessageSource<'a> {
+//     stdin: io::StdinLock<'a>,
+// }
+
+// struct VecMessageSource {
+//     vec: Vec<String>,
+// }
+
+trait MessageSource {}
+
+// enum MessageSource<'a> {
+//     FileMessageSource(io::BufReader<File>),
+//     StdinLockMessageSource(io::StdinLock<'a>),
+//     VecMessageSource(Vec<String>),
+// }
+
+// impl<'a> Iterator for MessageSource<'a> {
+//     type Item = Result<String, String>;
+
+//     fn next(&mut self) -> Option<Self::Item> {
+//         todo!();
+//     }
+// }
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn file_buf_returns_some_file_buf() {}
+    fn file_buf_returns_some_file_buf() {
+        let opt_path_buf = Some(PathBuf::from("src/main.rs"));
+        let buf = file_buf(&opt_path_buf);
+        assert!(buf.is_some());
+    }
 
     #[test]
-    fn file_buf_returns_none() {}
+    fn file_buf_returns_none() {
+        let opt_path_buf: Option<PathBuf> = None;
+        let buf = file_buf(&opt_path_buf);
+        assert!(buf.is_none());
+    }
 
     #[test]
-    fn read_all_invokes_callback_with_message_count_and_line() {}
+    fn read_all_invokes_callback_with_send_count_and_line() {
+        // let mut buf = &["See spot run.", "See spot jump.", "See spot run."];
+        // let mut buf = Cursor::new(vec!["See Spot run.".to_string()]);
+
+        // let buf = String::from("See Spot run.\nSee Spot jump.\nSee Spot run.\n").lines();
+
+        // read_all(1, 3, |send_count, line| {}, buf);
+    }
 
     #[test]
-    fn check_progress_test() {}
+    fn read_all_with_3_messages_and_rate_of_1_takes_3_seconds() {
+        //
+    }
+
+    #[test]
+    fn check_progress_returns_some_at_interval() {
+        let start = Instant::now();
+        let progress = check_progress(10, 10, &start);
+        assert!(progress.is_some());
+    }
+
+    #[test]
+    fn check_progress_returns_none_between_intervals() {
+        let start = Instant::now();
+        let progress = check_progress(3, 10, &start);
+        assert!(progress.is_none());
+    }
 }
