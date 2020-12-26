@@ -1,7 +1,6 @@
 #![warn(rust_2018_idioms)]
 
 use async_std::task;
-use futures::prelude::*;
 use governor::{Quota, RateLimiter};
 use log::*;
 use rdkafka::config::ClientConfig;
@@ -9,16 +8,14 @@ use rdkafka::producer::{DeliveryFuture, FutureProducer, FutureRecord};
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
-//use async_std::io;
-//use async_std::io::prelude::*;
 use std::ops::FnMut;
 use std::path::PathBuf;
 use std::time::Instant;
 use structopt::StructOpt;
 
+/// Options for kafka-player to use.
 #[derive(Debug, StructOpt)]
 #[structopt(name = "kafka-player")]
-/// Options for kafka-player to use.
 struct Opt {
     /// The Kafka bootstrap servers.
     #[structopt(short, long, default_value = "localhost:9092")]
@@ -84,27 +81,33 @@ fn main() {
     let kafka_config = ClientConfig::from(&opt);
     let producer: FutureProducer = kafka_config.create().expect("Producer creation failed");
 
-    // define the program to run generically over any `BufRead` trait object.
-    let program = |buf: Box<dyn BufRead>| {
-        // initialize a timer to track message rate
-        let start = Instant::now();
-        // block on `read_all` which awaits an async rate limiter.
-        task::block_on(read_all(
-            opt.message_rate,
-            opt.message_count,
-            // send to kafka and check progress on each callback from the read loop
-            |i, line| {
-                send_to_kafka(line, &opt.topic, &producer);
-                check_progress(i, opt.progress_interval, &start).map(|p| info!("{:?}", p));
-            },
-            buf.lines(),
-        ));
+    // initialize a timer to track message rate
+    let start = Instant::now();
+
+    // define a lambda to handle each message
+    let handle_message = |send_count, message| {
+        send_to_kafka(message, &opt.topic, &producer);
+        check_progress(send_count, opt.progress_interval, &start).map(|p| info!("{:?}", p));
     };
 
-    // invoke the program with the appropriate input buffer
+    // normalize between file input or standard in
     match file_buf(&opt.message_file) {
-        Some(b) => program(Box::new(b)),
-        None => program(Box::new(std::io::stdin().lock())),
+        Some(b) => {
+            task::block_on(read_iter(
+                opt.message_rate,
+                opt.message_count,
+                handle_message,
+                io_lines(b.lines()),
+            ));
+        }
+        None => {
+            task::block_on(read_iter(
+                opt.message_rate,
+                opt.message_count,
+                handle_message,
+                io_lines(io::stdin().lock().lines()),
+            ));
+        }
     }
 }
 
@@ -121,20 +124,20 @@ fn file_buf(path_buf: &Option<PathBuf>) -> Option<io::BufReader<File>> {
     }
 }
 
-fn async_lines<T>(reader: T) -> impl Stream<Item = Result<String, String>>
+fn io_lines<T>(lines: io::Lines<T>) -> impl Iterator<Item = Result<String, String>>
 where
     T: BufRead,
 {
-    stream::iter(reader.lines().map(|r| match r {
-        Ok(line) => Ok(line),
+    lines.map(|l| match l {
+        Ok(s) => Ok(s),
         Err(e) => Err(e.to_string()),
-    }))
+    })
 }
 
 /// Reads all messages in the buffer and invokes the given callback on each one.
-async fn read_all<T, F>(message_rate: u32, message_count: u32, mut callback: F, buf: io::Lines<T>)
+async fn read_iter<T, F>(message_rate: u32, message_count: u32, mut callback: F, messages: T)
 where
-    T: BufRead,
+    T: Iterator<Item = Result<String, String>>,
     F: FnMut(u32, String),
 {
     // setup rate limiter to send `message_rate` messages per second
@@ -146,7 +149,7 @@ where
     let mut send_count = 0u32;
 
     // iterate lines and invoke the callback for each one
-    for result in buf {
+    for result in messages {
         if send_count == message_count {
             info!("Sent {} lines. Terminating.", send_count);
             break;
@@ -190,6 +193,7 @@ fn spawn_and_log_error(fut: DeliveryFuture) -> task::JoinHandle<()> {
     })
 }
 
+/// Struct containing progress information of the task.
 #[derive(Debug)]
 struct Progress {
     send_count: u32,
@@ -200,6 +204,8 @@ struct Progress {
 }
 
 impl Progress {
+    /// Creates a new progress struct from a send count and start time.
+    /// Calculates message rate from these parameters.
     fn new(send_count: u32, start: &Instant) -> Self {
         let elapsed_millis = start.elapsed().as_millis() as f64;
         let elapsed_seconds = start.elapsed().as_secs_f32();
@@ -216,34 +222,6 @@ impl Progress {
         }
     }
 }
-
-// struct FileMessageSource {
-//     buf: io::BufReader<File>,
-// }
-
-// struct StdinLockMessageSource<'a> {
-//     stdin: io::StdinLock<'a>,
-// }
-
-// struct VecMessageSource {
-//     vec: Vec<String>,
-// }
-
-trait MessageSource {}
-
-// enum MessageSource<'a> {
-//     FileMessageSource(io::BufReader<File>),
-//     StdinLockMessageSource(io::StdinLock<'a>),
-//     VecMessageSource(Vec<String>),
-// }
-
-// impl<'a> Iterator for MessageSource<'a> {
-//     type Item = Result<String, String>;
-
-//     fn next(&mut self) -> Option<Self::Item> {
-//         todo!();
-//     }
-// }
 
 #[cfg(test)]
 mod tests {
@@ -264,18 +242,77 @@ mod tests {
     }
 
     #[test]
-    fn read_all_invokes_callback_with_send_count_and_line() {
-        // let mut buf = &["See spot run.", "See spot jump.", "See spot run."];
-        // let mut buf = Cursor::new(vec!["See Spot run.".to_string()]);
+    fn read_iter_invokes_callback_with_send_count_and_line() {
+        let messages: Vec<Result<String, String>> = vec![
+            String::from("See Spot run."),
+            String::from("See Spot jump."),
+            String::from("See Spot run."),
+        ]
+        .iter()
+        .map(|s| Ok(s.clone()))
+        .collect();
 
-        // let buf = String::from("See Spot run.\nSee Spot jump.\nSee Spot run.\n").lines();
+        let mut test_count = 0;
+        let message_slice = messages.clone();
+        let message_iter = messages.into_iter();
 
-        // read_all(1, 3, |send_count, line| {}, buf);
+        let f = read_iter(
+            1,
+            3,
+            |send_count, line| {
+                assert_eq!(test_count, send_count);
+                assert_eq!(message_slice[test_count as usize].clone().unwrap(), line);
+
+                test_count += 1;
+            },
+            message_iter,
+        );
+
+        task::block_on(f);
+
+        assert_eq!(3, test_count, "test count not expected {}", test_count);
     }
 
     #[test]
-    fn read_all_with_3_messages_and_rate_of_1_takes_3_seconds() {
-        //
+    fn read_iter_with_3_messages_and_rate_of_1_takes_3_seconds() {
+        let messages: Vec<Result<String, String>> = vec![
+            String::from("See Spot run."),
+            String::from("See Spot jump."),
+            String::from("See Spot run."),
+            String::from("See Spot run."),
+            String::from("See Spot run."),
+        ]
+        .iter()
+        .map(|s| Ok(s.clone()))
+        .collect();
+
+        let mut test_count = 0;
+        let message_slice = messages.clone();
+        let message_iter = messages.into_iter();
+
+        let start = Instant::now();
+
+        let f = read_iter(
+            1,
+            3,
+            |send_count, line| {
+                assert_eq!(test_count, send_count);
+                assert_eq!(message_slice[test_count as usize].clone().unwrap(), line);
+
+                test_count += 1;
+            },
+            message_iter,
+        );
+
+        task::block_on(f);
+
+        let secs = start.elapsed().as_secs_f32();
+
+        assert!(
+            secs > 1.9 && secs < 2.1,
+            format!("elapsed secs outside expected range {}", secs)
+        );
+        assert_eq!(3, test_count, "test count not expected {}", test_count);
     }
 
     #[test]
