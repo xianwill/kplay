@@ -34,11 +34,3 @@ The example plays 10,000 messages at a rate of one message every two seconds.
 
 The `example.json` data file is an abridged and slightly transformed (into a line delimited format) version of American movies from https://github.com/jdorfman/awesome-json-datasets#movies.
 
-
-fn double_positives<'a>(numbers: &'a Vec<i32>) -> impl Iterator<Item = i32> + 'a {
-    numbers
-        .iter()
-        .filter(|x| x > &&0)
-        .map(|x| x * 2)
-}
-
