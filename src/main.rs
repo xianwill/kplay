@@ -13,9 +13,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 use structopt::StructOpt;
 
-/// Options for kafka-player to use.
+/// Options for kplay to use.
 #[derive(Debug, StructOpt)]
-#[structopt(name = "kafka-player")]
+#[structopt(name = "kplay")]
 struct Opt {
     /// The Kafka bootstrap servers.
     #[structopt(short, long, default_value = "localhost:9092")]

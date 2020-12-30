@@ -22,7 +22,7 @@ fi
 
 echo "Invoking debug binary"
 
-cat $scriptpath/example.json | RUST_LOG=info $scriptpath/../../target/debug/kafka-player-rs \
+cat $scriptpath/example.json | RUST_LOG=info $scriptpath/../../target/debug/kplay \
   -c $message_count \
   -r $message_rate \
   -p $progress_interval \

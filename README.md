@@ -1,4 +1,4 @@
-# kafka-player
+# kplay
 
 Plays a file onto a Kafka topic - one line == one message.
 
@@ -24,7 +24,7 @@ docker-compose up -d
 ./example/movies/play-example.sh
 ```
 
-Once the player starts, run kafkacat in another terminal to verify your messages are coming in.
+Once kplay starts, run kafkacat in another terminal to verify your messages are coming in.
 
 ```
 kafkacat -C -b localhost:9092 -t example
