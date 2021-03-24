@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #
-# Runs the `kafka-player-rs` application against a local Kafka.
+# Runs the `kplay` application against a local Kafka.
 #
 
 set -eu
@@ -11,7 +11,7 @@ scriptpath="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 message_file=$scriptpath/example.json
 message_count=10000
 message_rate=1
-progress_interval=10
+progress_interval=3
 topic=example
 bootstrap_servers=localhost:9092
 

@@ -21,7 +21,7 @@ The example folder of this repository contains a data file called `example.json`
 docker-compose up -d
 
 # play the example data file onto the local kafka
-./example/movies/play-example.sh
+./examples/movies/play-example.sh
 ```
 
 Once kplay starts, run kafkacat in another terminal to verify your messages are coming in.

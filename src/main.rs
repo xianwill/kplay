@@ -81,47 +81,55 @@ fn main() {
     let kafka_config = ClientConfig::from(&opt);
     let producer: FutureProducer = kafka_config.create().expect("Producer creation failed");
 
+    play_file_or_stdin(&opt, &producer);
+}
+
+fn play_file_or_stdin(opt: &Opt, producer: &FutureProducer) {
     // initialize a timer to track message rate
     let start = Instant::now();
 
     // define a lambda to handle each message
     let handle_message = |send_count, message| {
-        send_to_kafka(message, &opt.topic, &producer);
+        send_to_kafka(message, &opt.topic, producer);
         check_progress(send_count, opt.progress_interval, &start).map(|p| info!("{:?}", p));
     };
 
-    // normalize between file input or standard in
-    match file_buf(&opt.message_file) {
-        Some(b) => {
-            task::block_on(read_iter(
-                opt.message_rate,
-                opt.message_count,
-                handle_message,
-                io_lines(b.lines()),
-            ));
+    // initialize send count
+    let mut send_count = 0u32;
+
+    match &opt.message_file {
+        Some(path_buf) => {
+            // replay the file until message_count is reached (in case file has fewer lines than
+            // required)
+            while send_count < opt.message_count {
+                println!("Playing file {:?}. Will replay until send_count (currently {}) matches message_count {}.", path_buf, send_count, opt.message_count);
+                let b = file_buf(path_buf);
+                task::block_on(read_iter(
+                    opt.message_rate,
+                    opt.message_count,
+                    handle_message,
+                    io_lines(b.lines()),
+                    &mut send_count,
+                ));
+            }
         }
         None => {
+            // play as many lines are available on stdin
             task::block_on(read_iter(
                 opt.message_rate,
                 opt.message_count,
                 handle_message,
                 io_lines(io::stdin().lock().lines()),
+                &mut send_count,
             ));
         }
     }
 }
 
-/// Creates an Option<BufReader<File>> for the file path specified in program options. Returns
-/// `None` if no path is specified in program options.
-fn file_buf(path_buf: &Option<PathBuf>) -> Option<io::BufReader<File>> {
-    match path_buf {
-        Some(p) => {
-            let path = p.as_path();
-            let file = File::open(path).expect(format!("Failed to open file {:?}", path).as_str());
-            Some(io::BufReader::new(file))
-        }
-        _ => None,
-    }
+fn file_buf(path_buf: &PathBuf) -> io::BufReader<File> {
+    let path = path_buf.as_path();
+    let file = File::open(path).expect(format!("Failed to open file {:?}", path).as_str());
+    io::BufReader::new(file)
 }
 
 fn io_lines<T>(lines: io::Lines<T>) -> impl Iterator<Item = Result<String, String>>
@@ -135,8 +143,13 @@ where
 }
 
 /// Reads all messages in the buffer and invokes the given callback on each one.
-async fn read_iter<T, F>(message_rate: u32, message_count: u32, mut callback: F, messages: T)
-where
+async fn read_iter<T, F>(
+    message_rate: u32,
+    message_count: u32,
+    mut callback: F,
+    messages: T,
+    send_count: &mut u32,
+) where
     T: Iterator<Item = Result<String, String>>,
     F: FnMut(u32, String),
 {
@@ -145,25 +158,22 @@ where
         nonzero_ext::NonZero::new(message_rate).unwrap(),
     ));
 
-    // initialize send count
-    let mut send_count = 0u32;
-
     // iterate lines and invoke the callback for each one
     for result in messages {
-        if send_count == message_count {
+        if *send_count == message_count {
             info!("Sent {} lines. Terminating.", send_count);
             break;
         }
         match result {
             Ok(line) => {
-                callback(send_count, line);
+                callback(send_count.clone(), line);
             }
             Err(e) => {
                 error!("Failed to read line {:?}", e);
             }
         }
         // increment the send count
-        send_count += 1;
+        *send_count += 1;
         // wait for the rate limiter before continuing
         limiter.until_ready().await
     }
