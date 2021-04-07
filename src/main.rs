@@ -238,20 +238,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_buf_returns_some_file_buf() {
-        let opt_path_buf = Some(PathBuf::from("src/main.rs"));
-        let buf = file_buf(&opt_path_buf);
-        assert!(buf.is_some());
-    }
-
-    #[test]
-    fn file_buf_returns_none() {
-        let opt_path_buf: Option<PathBuf> = None;
-        let buf = file_buf(&opt_path_buf);
-        assert!(buf.is_none());
-    }
-
-    #[test]
     fn read_iter_invokes_callback_with_send_count_and_line() {
         let messages: Vec<Result<String, String>> = vec![
             String::from("See Spot run."),
@@ -265,6 +251,7 @@ mod tests {
         let mut test_count = 0;
         let message_slice = messages.clone();
         let message_iter = messages.into_iter();
+        let mut send_count = 0;
 
         let f = read_iter(
             1,
@@ -276,6 +263,7 @@ mod tests {
                 test_count += 1;
             },
             message_iter,
+            &mut send_count,
         );
 
         task::block_on(f);
@@ -299,6 +287,7 @@ mod tests {
         let mut test_count = 0;
         let message_slice = messages.clone();
         let message_iter = messages.into_iter();
+        let mut send_count = 0;
 
         let start = Instant::now();
 
@@ -312,6 +301,7 @@ mod tests {
                 test_count += 1;
             },
             message_iter,
+            &mut send_count,
         );
 
         task::block_on(f);
