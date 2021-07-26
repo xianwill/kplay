@@ -59,6 +59,11 @@ impl From<&Opt> for ClientConfig {
                 let mut parts = p.splitn(2, "=");
                 let (key, value) = (&parts.next(), &parts.next());
 
+                info!(
+                    "Setting additional Kafka config for key {:?} with value {:?}",
+                    key, value
+                );
+
                 if key.is_none() || value.is_none() {
                     panic!("Malformed Kafka property specified as option {:?}", p)
                 }
@@ -182,7 +187,7 @@ async fn read_iter<T, F>(
 /// Writes the line to the specified Kafka topic.
 fn send_to_kafka(line: String, topic: &str, producer: &FutureProducer) {
     let record: FutureRecord<'_, String, String> = FutureRecord::to(topic).payload(&line);
-    spawn_and_log_error(producer.send(record, -1i64));
+    spawn_and_log_error(producer.send_result(record).unwrap());
 }
 
 /// Logs current progress.

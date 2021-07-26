@@ -9,8 +9,8 @@ set -eu
 scriptpath="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 message_file=$scriptpath/example.json
-message_count=10000
-message_rate=1
+message_count=1000000
+message_rate=2
 progress_interval=3
 topic=example
 bootstrap_servers=localhost:9092
