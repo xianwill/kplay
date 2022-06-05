@@ -1,17 +1,22 @@
 #![warn(rust_2018_idioms)]
+#![deny(warnings)]
 
-use async_std::task;
+use governor::clock::QuantaClock;
+use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
 use log::*;
 use rdkafka::config::ClientConfig;
-use rdkafka::producer::{DeliveryFuture, FutureProducer, FutureRecord};
-use std::fs::File;
-use std::io;
-use std::io::prelude::*;
-use std::ops::FnMut;
+use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::util::Timeout;
+use std::fmt;
 use std::path::PathBuf;
 use std::time::Instant;
 use structopt::StructOpt;
+use tokio::{
+    fs::File,
+    io::{self, stdin, AsyncBufReadExt, AsyncSeekExt, BufReader},
+    time::Duration,
+};
 
 /// Options for kplay to use.
 #[derive(Debug, StructOpt)]
@@ -56,13 +61,10 @@ impl From<&Opt> for ClientConfig {
 
         if let Some(kafka_props) = &opt.kafka_properties {
             kafka_props.iter().for_each(|p| {
-                let mut parts = p.splitn(2, "=");
+                let mut parts = p.splitn(2, '=');
                 let (key, value) = (&parts.next(), &parts.next());
 
-                info!(
-                    "Setting additional Kafka config for key {:?} with value {:?}",
-                    key, value
-                );
+                info!("Setting additional Kafka config for key {:?}", key);
 
                 if key.is_none() || value.is_none() {
                     panic!("Malformed Kafka property specified as option {:?}", p)
@@ -76,7 +78,8 @@ impl From<&Opt> for ClientConfig {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     pretty_env_logger::init();
 
     let opt = Opt::from_args();
@@ -85,252 +88,137 @@ fn main() {
 
     let kafka_config = ClientConfig::from(&opt);
     let producer: FutureProducer = kafka_config.create().expect("Producer creation failed");
-
-    play_file_or_stdin(&opt, &producer);
-}
-
-fn play_file_or_stdin(opt: &Opt, producer: &FutureProducer) {
-    // initialize a timer to track message rate
-    let start = Instant::now();
-
-    // define a lambda to handle each message
-    let handle_message = |send_count, message| {
-        send_to_kafka(message, &opt.topic, producer);
-        check_progress(send_count, opt.progress_interval, &start).map(|p| info!("{:?}", p));
-    };
-
-    // initialize send count
-    let mut send_count = 0u32;
-
-    match &opt.message_file {
-        Some(path_buf) => {
-            // replay the file until message_count is reached (in case file has fewer lines than
-            // required)
-            while send_count < opt.message_count {
-                println!("Playing file {:?}. Will replay until send_count (currently {}) matches message_count {}.", path_buf, send_count, opt.message_count);
-                let b = file_buf(path_buf);
-                task::block_on(read_iter(
-                    opt.message_rate,
-                    opt.message_count,
-                    handle_message,
-                    io_lines(b.lines()),
-                    &mut send_count,
-                ));
-            }
-        }
-        None => {
-            // play as many lines are available on stdin
-            task::block_on(read_iter(
-                opt.message_rate,
-                opt.message_count,
-                handle_message,
-                io_lines(io::stdin().lock().lines()),
-                &mut send_count,
-            ));
-        }
-    }
-}
-
-fn file_buf(path_buf: &PathBuf) -> io::BufReader<File> {
-    let path = path_buf.as_path();
-    let file = File::open(path).expect(format!("Failed to open file {:?}", path).as_str());
-    io::BufReader::new(file)
-}
-
-fn io_lines<T>(lines: io::Lines<T>) -> impl Iterator<Item = Result<String, String>>
-where
-    T: BufRead,
-{
-    lines.map(|l| match l {
-        Ok(s) => Ok(s),
-        Err(e) => Err(e.to_string()),
-    })
-}
-
-/// Reads all messages in the buffer and invokes the given callback on each one.
-async fn read_iter<T, F>(
-    message_rate: u32,
-    message_count: u32,
-    mut callback: F,
-    messages: T,
-    send_count: &mut u32,
-) where
-    T: Iterator<Item = Result<String, String>>,
-    F: FnMut(u32, String),
-{
-    // setup rate limiter to send `message_rate` messages per second
     let limiter = RateLimiter::direct(Quota::per_second(
-        nonzero_ext::NonZero::new(message_rate).unwrap(),
+        nonzero_ext::NonZero::new(opt.message_rate).unwrap(),
     ));
 
-    // iterate lines and invoke the callback for each one
-    for result in messages {
-        if *send_count == message_count {
-            info!("Sent {} lines. Terminating.", send_count);
-            break;
+    match &opt.message_file {
+        // play from a message file
+        Some(path_buf) => {
+            play_file(&opt, &producer, limiter, path_buf.clone()).await;
         }
-        match result {
-            Ok(line) => {
-                callback(send_count.clone(), line);
+        // play from stdin
+        None => {
+            play_stdin(&opt, &producer, limiter).await;
+        }
+    };
+}
+
+async fn play_file(
+    opt: &Opt,
+    producer: &FutureProducer,
+    limiter: RateLimiter<NotKeyed, InMemoryState, QuantaClock>,
+    path_buf: PathBuf,
+) {
+    let start = Instant::now();
+    let mut send_count = 0u32;
+
+    let f = File::open(path_buf.clone()).await.unwrap();
+    let mut reader = BufReader::new(f);
+
+    while send_count < opt.message_count {
+        let mut line = String::new();
+
+        match reader.read_line(&mut line).await {
+            Ok(bytes_read) if bytes_read > 0 => {
+                send_to_kafka(line.trim_end().to_string(), opt.topic.as_str(), producer).await;
+                check_progress(send_count, opt.progress_interval, &start);
+                send_count += 1;
+                limiter.until_ready().await;
+            }
+            Ok(_) => {
+                warn!("Reached end of file before sending desired message count. Re-seeking to beginning of file. Duplicate messages will be sent.");
+                reader.seek(io::SeekFrom::Start(0)).await.unwrap();
             }
             Err(e) => {
-                error!("Failed to read line {:?}", e);
+                error!("Failed to read line from file. {}", e);
+                break;
             }
         }
-        // increment the send count
-        *send_count += 1;
-        // wait for the rate limiter before continuing
-        limiter.until_ready().await
     }
 }
 
-/// Writes the line to the specified Kafka topic.
-fn send_to_kafka(line: String, topic: &str, producer: &FutureProducer) {
-    let record: FutureRecord<'_, String, String> = FutureRecord::to(topic).payload(&line);
-    spawn_and_log_error(producer.send_result(record).unwrap());
+async fn play_stdin(
+    opt: &Opt,
+    producer: &FutureProducer,
+    limiter: RateLimiter<NotKeyed, InMemoryState, QuantaClock>,
+) {
+    let start = Instant::now();
+    let mut send_count = 0u32;
+
+    let mut reader = BufReader::new(stdin());
+
+    while send_count < opt.message_count {
+        let mut line = String::new();
+
+        match reader.read_line(&mut line).await {
+            Ok(bytes_read) if bytes_read > 0 => {
+                send_to_kafka(line, opt.topic.as_str(), producer).await;
+                check_progress(send_count, opt.progress_interval, &start);
+                send_count += 1;
+                limiter.until_ready().await;
+            }
+            Ok(_) => {
+                info!("No more input available on stdin.");
+                break;
+            }
+            Err(e) => {
+                error!("Failed to read line from stdin. {}", e);
+                break;
+            }
+        }
+    }
+}
+
+async fn send_to_kafka(line: String, topic: &str, producer: &FutureProducer) {
+    let producer = producer.clone();
+    let topic = topic.to_string();
+
+    tokio::spawn(async move {
+        let record: FutureRecord<'_, String, String> = FutureRecord::to(&topic).payload(&line);
+        let delivery_status = producer.send(
+            record,
+            Timeout::After(Duration::from_secs(30)),
+        );
+        if let Err((kafka_error, _)) = delivery_status.await {
+            error!("Error sending line to Kafka. {}", kafka_error);
+        }
+    });
 }
 
 /// Logs current progress.
-fn check_progress(send_count: u32, progress_interval: u32, start: &Instant) -> Option<Progress> {
+fn check_progress(send_count: u32, progress_interval: u32, start: &Instant) {
     if send_count % progress_interval == 0 && send_count > 0 {
-        Some(Progress::new(send_count, start))
-    } else {
-        None
+        let p = Progress::new(send_count, start);
+        info!("{}", p);
     }
 }
 
-/// Spawns a separate task on which to await the future, logging an error result if appropriate.
-fn spawn_and_log_error(fut: DeliveryFuture) -> task::JoinHandle<()> {
-    task::spawn(async move {
-        if let Err(e) = fut.await {
-            error!("{:?}", e)
-        }
-    })
-}
-
 /// Struct containing progress information of the task.
-#[derive(Debug)]
 struct Progress {
     send_count: u32,
-    per_milli: f64,
-    per_sec: f64,
-    elapsed_seconds: f32,
-    elapsed_minutes: f32,
+    elapsed_secs: u64,
 }
 
 impl Progress {
     /// Creates a new progress struct from a send count and start time.
     /// Calculates message rate from these parameters.
     fn new(send_count: u32, start: &Instant) -> Self {
-        let elapsed_millis = start.elapsed().as_millis() as f64;
-        let elapsed_seconds = start.elapsed().as_secs_f32();
-        let elapsed_minutes = elapsed_seconds / 60 as f32;
-        let per_milli = send_count as f64 / elapsed_millis;
-        let per_sec = per_milli * 1000f64;
+        let elapsed_secs = start.elapsed().as_secs();
 
         Progress {
             send_count,
-            per_milli,
-            per_sec,
-            elapsed_seconds,
-            elapsed_minutes,
+            elapsed_secs,
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn read_iter_invokes_callback_with_send_count_and_line() {
-        let messages: Vec<Result<String, String>> = vec![
-            String::from("See Spot run."),
-            String::from("See Spot jump."),
-            String::from("See Spot run."),
-        ]
-        .iter()
-        .map(|s| Ok(s.clone()))
-        .collect();
-
-        let mut test_count = 0;
-        let message_slice = messages.clone();
-        let message_iter = messages.into_iter();
-        let mut send_count = 0;
-
-        let f = read_iter(
-            1,
-            3,
-            |send_count, line| {
-                assert_eq!(test_count, send_count);
-                assert_eq!(message_slice[test_count as usize].clone().unwrap(), line);
-
-                test_count += 1;
-            },
-            message_iter,
-            &mut send_count,
-        );
-
-        task::block_on(f);
-
-        assert_eq!(3, test_count, "test count not expected {}", test_count);
-    }
-
-    #[test]
-    fn read_iter_with_3_messages_and_rate_of_1_takes_3_seconds() {
-        let messages: Vec<Result<String, String>> = vec![
-            String::from("See Spot run."),
-            String::from("See Spot jump."),
-            String::from("See Spot run."),
-            String::from("See Spot run."),
-            String::from("See Spot run."),
-        ]
-        .iter()
-        .map(|s| Ok(s.clone()))
-        .collect();
-
-        let mut test_count = 0;
-        let message_slice = messages.clone();
-        let message_iter = messages.into_iter();
-        let mut send_count = 0;
-
-        let start = Instant::now();
-
-        let f = read_iter(
-            1,
-            3,
-            |send_count, line| {
-                assert_eq!(test_count, send_count);
-                assert_eq!(message_slice[test_count as usize].clone().unwrap(), line);
-
-                test_count += 1;
-            },
-            message_iter,
-            &mut send_count,
-        );
-
-        task::block_on(f);
-
-        let secs = start.elapsed().as_secs_f32();
-
-        assert!(
-            secs > 1.9 && secs < 2.1,
-            format!("elapsed secs outside expected range {}", secs)
-        );
-        assert_eq!(3, test_count, "test count not expected {}", test_count);
-    }
-
-    #[test]
-    fn check_progress_returns_some_at_interval() {
-        let start = Instant::now();
-        let progress = check_progress(10, 10, &start);
-        assert!(progress.is_some());
-    }
-
-    #[test]
-    fn check_progress_returns_none_between_intervals() {
-        let start = Instant::now();
-        let progress = check_progress(3, 10, &start);
-        assert!(progress.is_none());
+impl fmt::Display for Progress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Total messages sent: {}. Elapsed seconds: {}.",
+            self.send_count, self.elapsed_secs
+        )
     }
 }

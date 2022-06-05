@@ -10,8 +10,8 @@ scriptpath="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 message_file=$scriptpath/example.json
 message_count=1000000
-message_rate=2
-progress_interval=3
+message_rate=10
+progress_interval=20
 topic=example
 bootstrap_servers=localhost:9092
 
