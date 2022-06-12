@@ -2,7 +2,9 @@
 
 Plays a file onto a Kafka topic - one line == one message.
 
-Run `--help` to see a full list of options. The primary useful option is `--message-rate`, which can be used to simulate real production workloads.
+Run `--help` to see a full list of options. 
+
+The primary useful option is `--rate`. The original intention of kplay was to simulate production workloads (with realistic messages-per-second rate) in dev environments.
 
 ## Build
 
