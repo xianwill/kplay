@@ -7,19 +7,16 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-config = "0.13"
-jsonschema = "0.16"
-glob = "0.3"
-rdkafka = { version = "0.28", features = ["ssl"] }
+clap = { version = "3.1.18", features = ["derive"] }
+governor = "0.3"
 log = "0.4"
 nonzero_ext = "0.3"
 pretty_env_logger = "0.4"
-governor = "0.3"
+rdkafka = { version = "0.28", features = ["ssl"] }
 serde = { version = "1.0", features = ["rc"] }
 serde_derive = "1.0"
 serde_json = "1.0"
 serde_yaml = "0.8"
-structopt = "0.3"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0", features = ["fs"] }
 tokio-util = "0"
